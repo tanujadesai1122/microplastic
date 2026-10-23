@@ -16,8 +16,8 @@ import "./App.css";
 
 const COLORS = ["#0891b2", "#8b5cf6", "#f59e0b", "#10b981"];
 
-const API_URL = "http://localhost:5000";
-const AI_URL = "http://localhost:8000";
+const API_URL = "https://microplastic-1-88mt.onrender.com";
+const AI_URL = "https://microplastic-833w.onrender.com";
 
 function ScreeningStatus({ totalParticles }) {
   const count = Number(totalParticles) || 0;
