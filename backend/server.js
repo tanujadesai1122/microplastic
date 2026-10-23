@@ -119,6 +119,7 @@ app.post("/api/analyze", upload.array("images"), async (req, res) => {
     }
 });
 
+
 // Get all saved analyses
 app.get("/api/history", (req, res) => {
     try {
