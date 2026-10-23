@@ -68,7 +68,7 @@ app.post("/api/analyze", upload.array("images"), async (req, res) => {
                 headers: formData.getHeaders(),
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity,
-                timeout: 120000
+                timeout: 300000
             }
         );
 
