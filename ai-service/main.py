@@ -1,5 +1,6 @@
 import os
 import uuid
+import time
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -137,13 +138,20 @@ def predict():
             saved_uploads.append(upload_path)
 
             # Run YOLO prediction
+            start_time = time.time()
+
             predictions = model.predict(
-            source=str(upload_path),
-            conf=0.25,
-            imgsz=320,
-            device="cpu",
-            verbose=False
-        )   
+                source=str(upload_path),
+                conf=0.25,
+                imgsz=320,
+                device="cpu",
+                verbose=False
+            )
+
+            app.logger.info(
+                "YOLO inference completed in %.2f seconds",
+                time.time() - start_time
+            )
 
             prediction = predictions[0]
             particles = []
