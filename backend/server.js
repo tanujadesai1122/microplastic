@@ -1,3 +1,4 @@
+
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -14,17 +15,29 @@ const {
 
 const app = express();
 
-
 app.use(cors());
 app.use(express.json());
 
-// Upload configuration
+// --------------------------------------------------
+// UPLOAD CONFIGURATION
+// --------------------------------------------------
+
 const uploadFolder = path.join(__dirname, "uploads");
+
 fs.mkdirSync(uploadFolder, { recursive: true });
 
-const upload = multer({ dest: uploadFolder });
+const upload = multer({
+    dest: uploadFolder,
+    limits: {
+        files: 5,
+        fileSize: 25 * 1024 * 1024
+    }
+});
 
-// Home route
+// --------------------------------------------------
+// HEALTH CHECK
+// --------------------------------------------------
+
 app.get("/", (req, res) => {
     res.json({
         success: true,
@@ -32,54 +45,98 @@ app.get("/", (req, res) => {
     });
 });
 
-// Analyze images
-app.post("/api/analyze", upload.array("images"), async (req, res) => {
-    let pythonResponse;
+// --------------------------------------------------
+// ANALYZE IMAGES USING PYTHON AI SERVICE
+// --------------------------------------------------
 
-    try {
-        if (!req.files || req.files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "No images uploaded."
-            });
-        }
+app.post(
+    "/api/analyze",
+    upload.array("images", 5),
+    async (req, res) => {
+        const uploadStreams = [];
 
-        console.log(`Received ${req.files.length} image(s).`);
-
-        const formData = new FormData();
-
-        for (const file of req.files) {
-            formData.append("images", fs.createReadStream(file.path), {
-                filename: file.originalname,
-                contentType: file.mimetype
-            });
-        }
-
-        const aiServiceUrl = process.env.AI_SERVICE_URL;
-
-        if (!aiServiceUrl) {
-            throw new Error("AI_SERVICE_URL environment variable is missing");
-        }
-
-        pythonResponse = await axios.post(
-            `${aiServiceUrl.replace(/\/+$/, "")}/predict`,
-            formData,
-            {
-                headers: formData.getHeaders(),
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity,
-                timeout: 300000
+        try {
+            if (!req.files || req.files.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "No images uploaded."
+                });
             }
-        );
 
-        const result = pythonResponse.data;
+            console.log(
+                `Received ${req.files.length} image(s).`
+            );
 
-        // Save only successful analysis responses
-        if (result && result.success === true) {
+            const aiServiceUrl =
+                process.env.AI_SERVICE_URL;
+
+            if (!aiServiceUrl) {
+                throw new Error(
+                    "AI_SERVICE_URL environment variable is missing."
+                );
+            }
+
+            const aiUrl =
+                `${aiServiceUrl.replace(/\/+$/, "")}/predict`;
+
+            console.log("AI endpoint:", aiUrl);
+
+            const formData = new FormData();
+
+            for (const file of req.files) {
+                const stream = fs.createReadStream(file.path);
+
+                uploadStreams.push(stream);
+
+                formData.append("images", stream, {
+                    filename: file.originalname,
+                    contentType: file.mimetype
+                });
+            }
+
+            console.log(
+                "Sending images to Python AI service..."
+            );
+
+            const pythonResponse = await axios.post(
+                aiUrl,
+                formData,
+                {
+                    headers: formData.getHeaders(),
+                    maxContentLength: Infinity,
+                    maxBodyLength: Infinity,
+                    timeout: 300000
+                }
+            );
+
+            console.log(
+                "AI response status:",
+                pythonResponse.status
+            );
+
+            const result = pythonResponse.data;
+
+            if (!result || result.success !== true) {
+                console.error(
+                    "AI returned an unsuccessful result:",
+                    result
+                );
+
+                return res.status(502).json({
+                    success: false,
+                    message:
+                        result?.message ||
+                        "The AI service did not complete the analysis."
+                });
+            }
+
+            // Save successful analysis to SQLite.
             try {
                 saveAnalysis.run(
                     new Date().toISOString(),
-                    Number(result.total_images ?? req.files.length),
+                    Number(
+                        result.total_images ?? req.files.length
+                    ),
                     Number(result.total_particles ?? 0),
                     JSON.stringify(result.counts ?? {}),
                     JSON.stringify(result.results ?? [])
@@ -87,40 +144,84 @@ app.post("/api/analyze", upload.array("images"), async (req, res) => {
 
                 console.log("Analysis saved to history.");
             } catch (dbError) {
-                // A history error should not discard successful detection.
-                console.error("Could not save analysis history:", dbError.message);
+                console.error(
+                    "Could not save analysis history:",
+                    dbError.message
+                );
             }
-        }
 
-        return res.json(result);
+            return res.json(result);
 
-    } catch (error) {
-        console.error("Analysis error:", error.message);
+        } catch (error) {
+            console.error(
+                "Analysis error:",
+                error.message
+            );
 
-        return res.status(500).json({
-            success: false,
-            message: "Could not connect to Python AI service.",
-            error: error.message
-        });
+            console.error(
+                "Axios error code:",
+                error.code || "Not provided"
+            );
 
-    } finally {
-        // Always clean up temporary Node upload files
-        if (req.files) {
-            for (const file of req.files) {
-                try {
-                    if (fs.existsSync(file.path)) {
-                        fs.unlinkSync(file.path);
+            console.error(
+                "AI HTTP status:",
+                error.response?.status || "No HTTP response"
+            );
+
+            console.error(
+                "AI response body:",
+                error.response?.data || "No response body"
+            );
+
+            const isTimeout =
+                error.code === "ECONNABORTED" ||
+                error.code === "ETIMEDOUT";
+
+            const statusCode = isTimeout
+                ? 504
+                : error.response
+                    ? 502
+                    : 502;
+
+            return res.status(statusCode).json({
+                success: false,
+                message: isTimeout
+                    ? "Python AI service timed out while processing the images."
+                    : "The backend could not complete the request to the Python AI service.",
+                error: error.response?.data?.message ||
+                    error.message
+            });
+
+        } finally {
+            // Close streams and remove temporary uploaded files.
+            for (const stream of uploadStreams) {
+                if (!stream.destroyed) {
+                    stream.destroy();
+                }
+            }
+
+            if (req.files) {
+                for (const file of req.files) {
+                    try {
+                        if (fs.existsSync(file.path)) {
+                            fs.unlinkSync(file.path);
+                        }
+                    } catch (cleanupError) {
+                        console.error(
+                            "Upload cleanup failed:",
+                            cleanupError.message
+                        );
                     }
-                } catch (cleanupError) {
-                    console.error("Upload cleanup failed:", cleanupError.message);
                 }
             }
         }
     }
-});
+);
 
+// --------------------------------------------------
+// GET ALL ANALYSIS HISTORY
+// --------------------------------------------------
 
-// Get all saved analyses
 app.get("/api/history", (req, res) => {
     try {
         const rows = getHistory.all();
@@ -134,23 +235,29 @@ app.get("/api/history", (req, res) => {
             results: JSON.parse(row.results_json)
         }));
 
-        res.json({
+        return res.json({
             success: true,
             total_records: history.length,
             history
         });
 
     } catch (error) {
-        console.error("History retrieval error:", error.message);
+        console.error(
+            "History retrieval error:",
+            error.message
+        );
 
-        res.status(500).json({
+        return res.status(500).json({
             success: false,
             message: "Could not retrieve analysis history."
         });
     }
 });
 
-// Get one saved analysis by ID
+// --------------------------------------------------
+// GET ONE ANALYSIS BY ID
+// --------------------------------------------------
+
 app.get("/api/history/:id", (req, res) => {
     try {
         const id = Number(req.params.id);
@@ -173,7 +280,7 @@ app.get("/api/history/:id", (req, res) => {
             });
         }
 
-        res.json({
+        return res.json({
             success: true,
             history: {
                 id: row.id,
@@ -186,17 +293,31 @@ app.get("/api/history/:id", (req, res) => {
         });
 
     } catch (error) {
-        console.error("History detail error:", error.message);
+        console.error(
+            "History detail error:",
+            error.message
+        );
 
-        res.status(500).json({
+        return res.status(500).json({
             success: false,
             message: "Could not retrieve this analysis."
         });
     }
 });
 
+// --------------------------------------------------
+// START SERVER
+// --------------------------------------------------
+
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Node.js server listening on port ${PORT}`);
+    console.log(
+        `Node.js server listening on port ${PORT}`
+    );
+
+    console.log(
+        "AI_SERVICE_URL configured:",
+        Boolean(process.env.AI_SERVICE_URL)
+    );
 });
