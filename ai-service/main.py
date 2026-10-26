@@ -1,8 +1,9 @@
 import os
 import uuid
-import time
 from pathlib import Path
 
+import numpy as np
+import torch
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
@@ -23,7 +24,10 @@ RESULT_FOLDER = BASE_DIR / "results"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 RESULT_FOLDER.mkdir(parents=True, exist_ok=True)
 
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB total
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
+
+# Reduce CPU thread usage on limited-resource servers.
+torch.set_num_threads(1)
 
 # --------------------------------------------------
 # LOAD TRAINED YOLO MODEL
@@ -31,8 +35,8 @@ app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB total
 
 if not MODEL_PATH.exists():
     raise FileNotFoundError(
-        f"Model file not found: {MODEL_PATH}\n"
-        "Please place best.pt inside the ai_service folder."
+        f"Model file not found: {MODEL_PATH}. "
+        "Place best.pt inside the ai_service folder."
     )
 
 model = YOLO(str(MODEL_PATH))
@@ -67,6 +71,10 @@ SOURCE_INFO = {
     ),
 }
 
+SUPPORTED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".webp"
+}
+
 # --------------------------------------------------
 # HEALTH CHECK
 # --------------------------------------------------
@@ -80,7 +88,7 @@ def home():
 
 
 # --------------------------------------------------
-# SERVE YOLO RESULT IMAGES TO REACT
+# SERVE YOLO RESULT IMAGES
 # --------------------------------------------------
 
 @app.route("/results/<path:filename>", methods=["GET"])
@@ -99,12 +107,20 @@ def predict():
     try:
         uploaded_files = request.files.getlist("images")
 
-        if not uploaded_files or all(
-            not file.filename for file in uploaded_files
-        ):
+        valid_files = [
+            file for file in uploaded_files
+            if file and file.filename
+            and Path(file.filename).suffix.lower()
+            in SUPPORTED_EXTENSIONS
+        ]
+
+        if not valid_files:
             return jsonify({
                 "success": False,
-                "message": "Please upload at least one image."
+                "message": (
+                    "Please upload at least one supported image: "
+                    "JPG, JPEG, PNG, BMP, or WEBP."
+                )
             }), 400
 
         all_results = []
@@ -117,102 +133,89 @@ def predict():
             "pellet": 0
         }
 
-        for uploaded_file in uploaded_files:
-            if not uploaded_file.filename:
-                continue
-
-            # Save uploaded image with a unique filename
+        for uploaded_file in valid_files:
             original_name = Path(uploaded_file.filename).name
-            extension = Path(original_name).suffix.lower()
-
-            if extension not in {
-                ".jpg", ".jpeg", ".png", ".bmp", ".webp"
-            }:
-                continue
-
             unique_id = uuid.uuid4().hex
+
             upload_name = f"{unique_id}_{original_name}"
             upload_path = UPLOAD_FOLDER / upload_name
 
             uploaded_file.save(str(upload_path))
             saved_uploads.append(upload_path)
 
-            # Run YOLO prediction
-            #start_time = time.time()
+            app.logger.info(
+                "Starting YOLO prediction for: %s",
+                original_name
+            )
 
-            # predictions = model.predict(
-            #     source=str(upload_path),
-            #     conf=0.25,
-            #     imgsz=320,
-            #     device="cpu",
-            #     verbose=False
-            # )
-
-            # app.logger.info(
-            #     "YOLO inference completed in %.2f seconds",
-            #     time.time() - start_time
-            # ) 
-            app.logger.info("Starting prediction for: %s", original_name)
-
+            # Lower inference image size and limit detections
+            # to reduce CPU and memory usage.
             predictions = model.predict(
                 source=str(upload_path),
                 conf=0.25,
-                imgsz=320,
+                imgsz=256,
                 device="cpu",
+                max_det=100,
                 verbose=False
             )
 
-            app.logger.info("Prediction completed for: %s", original_name)
+            if not predictions:
+                app.logger.warning(
+                    "No prediction returned for %s",
+                    original_name
+                )
+                continue
 
             prediction = predictions[0]
+
+            app.logger.info(
+                "YOLO prediction completed for: %s",
+                original_name
+            )
+
             particles = []
 
-            # Build a result image with bounding boxes
+            # Save annotated image.
             plotted_image = prediction.plot()
-
-            # Ultralytics returns a BGR image; convert to RGB
-            # before saving with Pillow.
-            from PIL import Image as PILImage
-            from ultralytics.utils.plotting import colors
-            import numpy as np
-
             rgb_image = plotted_image[:, :, ::-1]
+
             result_filename = f"result_{unique_id}.jpg"
             result_path = RESULT_FOLDER / result_filename
 
-            PILImage.fromarray(
+            Image.fromarray(
                 np.ascontiguousarray(rgb_image)
-            ).save(result_path, format="JPEG", quality=95)
+            ).save(
+                result_path,
+                format="JPEG",
+                quality=90
+            )
 
             boxes = prediction.boxes
 
             if boxes is not None:
                 image_height, image_width = prediction.orig_shape
-                image_area = max(
-                    image_height * image_width, 1
-                )
+                image_area = max(image_height * image_width, 1)
 
                 for box in boxes:
                     class_id = int(box.cls[0].item())
-                    class_name = model.names.get(
-                        class_id, str(class_id)
+
+                    class_name = str(
+                        model.names.get(class_id, class_id)
                     ).lower().strip()
 
                     confidence = round(
                         float(box.conf[0].item()) * 100, 2
                     )
 
-                    # Bounding-box area as a proportion of image area.
-                    # This is a relative visual estimate, not a physical
-                    # particle measurement.
                     x1, y1, x2, y2 = [
                         float(value)
                         for value in box.xyxy[0].tolist()
                     ]
 
-                    box_area = max(
-                        x2 - x1, 0
-                    ) * max(y2 - y1, 0)
+                    box_area = (
+                        max(x2 - x1, 0)
+                        * max(y2 - y1, 0)
+                    )
 
                     area_percentage = (
                         box_area / image_area
@@ -229,8 +232,8 @@ def predict():
                         class_name,
                         (
                             "Unknown possible source",
-                            "Review the detection and consider laboratory "
-                            "confirmation."
+                            "Review the detection and consider "
+                            "laboratory confirmation."
                         )
                     )
 
@@ -258,11 +261,14 @@ def predict():
         if not all_results:
             return jsonify({
                 "success": False,
-                "message": (
-                    "No supported image files were uploaded. "
-                    "Use JPG, JPEG, PNG, BMP, or WEBP."
-                )
+                "message": "No images could be analyzed."
             }), 400
+
+        app.logger.info(
+            "Analysis complete: %s image(s), %s particle(s)",
+            len(all_results),
+            total_particles
+        )
 
         return jsonify({
             "success": True,
@@ -271,10 +277,11 @@ def predict():
             "total_particles": total_particles,
             "counts": counts,
             "results": all_results
-        })
+        }), 200
 
     except Exception as error:
         app.logger.exception("Image analysis failed.")
+
         return jsonify({
             "success": False,
             "message": "An error occurred during image analysis.",
@@ -282,11 +289,11 @@ def predict():
         }), 500
 
     finally:
-        # Remove uploaded originals after processing.
+        # Delete temporary original uploads.
         for file_path in saved_uploads:
             try:
                 if file_path.exists():
-                    os.remove(file_path)
+                    file_path.unlink()
             except OSError:
                 app.logger.warning(
                     "Could not remove temporary upload: %s",
@@ -295,12 +302,12 @@ def predict():
 
 
 # --------------------------------------------------
-# START SERVICE
+# START LOCAL DEVELOPMENT SERVER
 # --------------------------------------------------
 
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=8000,
+        port=int(os.environ.get("PORT", 8000)),
         debug=False
     )
