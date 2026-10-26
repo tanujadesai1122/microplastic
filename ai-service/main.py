@@ -138,7 +138,21 @@ def predict():
             saved_uploads.append(upload_path)
 
             # Run YOLO prediction
-            start_time = time.time()
+            #start_time = time.time()
+
+            # predictions = model.predict(
+            #     source=str(upload_path),
+            #     conf=0.25,
+            #     imgsz=320,
+            #     device="cpu",
+            #     verbose=False
+            # )
+
+            # app.logger.info(
+            #     "YOLO inference completed in %.2f seconds",
+            #     time.time() - start_time
+            # ) 
+            app.logger.info("Starting prediction for: %s", original_name)
 
             predictions = model.predict(
                 source=str(upload_path),
@@ -148,10 +162,7 @@ def predict():
                 verbose=False
             )
 
-            app.logger.info(
-                "YOLO inference completed in %.2f seconds",
-                time.time() - start_time
-            )
+            app.logger.info("Prediction completed for: %s", original_name)
 
             prediction = predictions[0]
             particles = []
