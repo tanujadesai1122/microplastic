@@ -137,11 +137,13 @@ def predict():
             saved_uploads.append(upload_path)
 
             # Run YOLO prediction
-            predictions = model(
-                str(upload_path),
-                conf=0.25,
-                verbose=False
-            )
+            predictions = model.predict(
+            source=str(upload_path),
+            conf=0.25,
+            imgsz=320,
+            device="cpu",
+            verbose=False
+        )   
 
             prediction = predictions[0]
             particles = []
