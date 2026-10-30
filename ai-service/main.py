@@ -24,7 +24,7 @@ RESULT_FOLDER = BASE_DIR / "results"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 RESULT_FOLDER.mkdir(parents=True, exist_ok=True)
 
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
 # Reduce CPU thread usage on limited-resource servers.
 torch.set_num_threads(1)
@@ -102,11 +102,19 @@ def serve_result_image(filename):
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    app.logger.info("========== PREDICT REQUEST RECEIVED ==========")
     saved_uploads = []
+
+    app.logger.info("Received POST request at /predict")
 
     try:
         uploaded_files = request.files.getlist("images")
 
+        app.logger.info(
+            "Received %d uploaded image(s)",
+            len(uploaded_files)
+        )
+        
         valid_files = [
             file for file in uploaded_files
             if file and file.filename
@@ -143,10 +151,7 @@ def predict():
             uploaded_file.save(str(upload_path))
             saved_uploads.append(upload_path)
 
-            app.logger.info(
-                "Starting YOLO prediction for: %s",
-                original_name
-            )
+            app.logger.info("YOLO inference completed successfully.")
 
             # Lower inference image size and limit detections
             # to reduce CPU and memory usage.
