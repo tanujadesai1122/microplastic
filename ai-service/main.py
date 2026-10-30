@@ -114,6 +114,8 @@ def predict():
             "Received %d uploaded image(s)",
             len(uploaded_files)
         )
+
+        
         
         valid_files = [
             file for file in uploaded_files
